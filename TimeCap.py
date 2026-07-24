@@ -50,7 +50,7 @@ DEFAULT_CONFIG = {
 
 
 def load_config():
-    """config.json 로드. 없거나 깨졌으면 DEFAULT_CONFIG."""
+    """Load config.json; fall back to DEFAULT_CONFIG if missing or broken."""
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH) as f:
@@ -61,7 +61,7 @@ def load_config():
 
 
 def save_config():
-    """현재 모듈 전역값을 config.json에 저장. 실패해도 앱은 계속."""
+    """Persist current module globals to config.json. App continues on failure."""
     try:
         os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
         with open(CONFIG_PATH, "w") as f:
@@ -81,14 +81,14 @@ CAPTURE_INTERVAL = _cfg["capture_interval"]   # seconds between captures (mutabl
 MIN_FRAMES       = 30                          # minimum frames required for video
 FPS              = 4                           # output video framerate
 IDLE_THRESHOLD   = _cfg["idle_threshold"]      # seconds — pause capture when user idle longer (mutable via menu)
-IDLE_MODE        = _cfg["idle_mode"]           # skip | compress | label  (compress/label: 미구현, skip과 동일)
-SOUND_ENABLED    = _cfg["sound_enabled"]       # pause/resume 사운드 알림
-BASE_DIR         = _cfg["base_dir"]            # 저장 폴더 — 메뉴 Storage에서 변경
+IDLE_MODE        = _cfg["idle_mode"]           # skip | compress | label  (compress/label: not implemented, same as skip)
+SOUND_ENABLED    = _cfg["sound_enabled"]       # sound cue on pause/resume
+BASE_DIR         = _cfg["base_dir"]            # storage folder — change via Storage menu
 
-IDLE_POLL_INTERVAL = 1      # idle 상태 폴링 주기(초) — 복귀 딜레이 최소화용
+IDLE_POLL_INTERVAL = 1      # idle polling interval (s) — minimizes resume delay
 
-INTERVAL_CHOICES  = [10, 15, 30, 60]             # 캡처 간격 선택지(초)
-IDLE_CHOICES_SEC  = [30, 60, 180, 300, 600]      # 자리비움 감지 선택지(초)  = 30초/1분/3분/5분/10분
+INTERVAL_CHOICES  = [10, 15, 30, 60]             # capture interval choices (s)
+IDLE_CHOICES_SEC  = [30, 60, 180, 300, 600]      # idle threshold choices (s) = 30s/1m/3m/5m/10m
 IDLE_MODE_CHOICES = ["skip", "compress", "label"]
 
 PAUSE_SOUND  = "/System/Library/Sounds/Tink.aiff"
@@ -102,7 +102,7 @@ def _fmt_seconds(sec):
 
 
 def get_idle_seconds():
-    """macOS 시스템 유휴 시간(초). ioreg HIDIdleTime 기반."""
+    """System idle time in seconds, from ioreg HIDIdleTime."""
     try:
         result = subprocess.run(
             ["ioreg", "-c", "IOHIDSystem"],
@@ -118,7 +118,7 @@ def get_idle_seconds():
 
 
 def play_sound(event: str):
-    """event: 'pause' | 'resume'. SOUND_ENABLED OFF이면 무동작. 비블로킹(Popen)."""
+    """event: 'pause' | 'resume'. No-op when SOUND_ENABLED is off. Non-blocking (Popen)."""
     if not SOUND_ENABLED:
         return
     path = PAUSE_SOUND if event == "pause" else RESUME_SOUND if event == "resume" else None
@@ -221,8 +221,8 @@ class TimeCap(rumps.App):
         self.frame_count   = len(FileManager.snapshot())
         self.fail_count    = 0
         self.skip_count    = 0       # frames skipped due to idle
-        self._skip_logged  = False   # idle 스킵 구간 진입 시 로그 1회만 — 폭증 방지
-        self.last_video_files = []   # Make Video 시점 파일 스냅샷 — Archive Move race 방지용
+        self._skip_logged  = False   # log idle-skip entry only once — avoids log flooding
+        self.last_video_files = []   # file snapshot at Make Video time — guards Archive Move race
 
         # menu items
         self.status_item  = rumps.MenuItem("TC — idle",      callback=None)
@@ -231,7 +231,7 @@ class TimeCap(rumps.App):
         self.video_item   = rumps.MenuItem("Make Video",     callback=self.make_video)
         self.archive_item = rumps.MenuItem("Archive Move",   callback=self.archive_move)
 
-        # option submenus (개발 단계 — 모든 옵션 메뉴에 노출, 확정 후 상수로 굳힘)
+        # option submenus (dev stage — all options exposed in menu; freeze into constants once settled)
         self.interval_items = {}   # {seconds: MenuItem}
         self.interval_menu  = rumps.MenuItem(self._interval_title())
         for sec in INTERVAL_CHOICES:
@@ -261,7 +261,7 @@ class TimeCap(rumps.App):
         for mode in IDLE_MODE_CHOICES:
             implemented = (mode == "skip")
             label = mode if implemented else f"{mode} (not implemented)"
-            # compress / label — 추후 구현. 지금은 선택 불가 처리(callback=None).
+            # compress / label — future work; disabled for now (callback=None).
             cb = (lambda s, v=mode: self.set_idle_mode(v)) if implemented else None
             item = rumps.MenuItem(label, callback=cb)
             if mode == IDLE_MODE:
@@ -330,7 +330,7 @@ class TimeCap(rumps.App):
         self._sync_menu()
 
     def idle_check_tick(self, _):
-        """1초마다 idle 상태 전이만 감지 — 복귀 딜레이 최소화 + 사운드 트리거."""
+        """Detect idle-state transitions every second — minimal resume delay + sound trigger."""
         idle = get_idle_seconds()
         was_idle = self.is_idle
         self.is_idle = idle > IDLE_THRESHOLD
@@ -343,7 +343,7 @@ class TimeCap(rumps.App):
         self._sync_menu()
 
     def _log_event(self, event):
-        """logs/tc_YYYYMMDD.log 에 한 줄 기록. 쓰기 실패해도 앱은 계속."""
+        """Append one line to logs/tc_YYYYMMDD.log. App continues on write failure."""
         stamp = datetime.now().strftime("%Y%m%d")
         log_path = os.path.join(FileManager.logs_dir(), f"tc_{stamp}.log")
         try:
@@ -353,12 +353,12 @@ class TimeCap(rumps.App):
             pass
 
     def capture_tick(self, _):
-        # idle_check_tick이 self.is_idle을 1초 폴링으로 유지함 — 여기서는 결과만 신뢰.
+        # idle_check_tick maintains self.is_idle via 1 s polling — just trust it here.
         if self.is_idle:
-            # IDLE_MODE: skip(기본) / compress / label
-            # compress, label은 미구현 — 일단 skip과 동일 동작
+            # IDLE_MODE: skip (default) / compress / label
+            # compress and label are not implemented — behave like skip for now
             if not self._skip_logged:
-                # idle 스킵 구간 진입 — 1회만 기록(매 tick 기록 시 로그 폭증).
+                # entering idle-skip span — log once (per-tick logging would flood).
                 self._log_event("CAPTURE_SKIP idle=True")
                 self._skip_logged = True
             self.skip_count += 1
@@ -372,8 +372,8 @@ class TimeCap(rumps.App):
                 capture_output=True, timeout=15
             )
         except subprocess.TimeoutExpired:
-            # 외장드라이브 I/O 스톨 등으로 screencapture가 15초 내 끝나지 않음.
-            # 메인 루프 freeze 방지 — CAPTURE_FAIL과 동일 처리.
+            # screencapture did not finish within 15 s (e.g. external-drive I/O stall).
+            # Prevents main-loop freeze — handled the same as CAPTURE_FAIL.
             self._skip_logged = False
             self.fail_count += 1
             self._log_event("CAPTURE_TIMEOUT")
@@ -392,8 +392,8 @@ class TimeCap(rumps.App):
             self._sync_menu()
             if self.fail_count == 1:
                 rumps.notification(
-                    "TimeCap", "캡처 실패",
-                    "화면 기록 권한을 확인해주세요: 시스템 설정 → 개인정보 보호 → 화면 기록"
+                    "TimeCap", "Capture failed",
+                    "Check Screen Recording permission: System Settings → Privacy & Security → Screen Recording"
                 )
                 subprocess.Popen(
                     ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"]
@@ -416,7 +416,8 @@ class TimeCap(rumps.App):
             )
             return
 
-        # 스냅샷 — Make Video 도중/이후 신규 캡처가 Archive Move에 휩쓸리지 않게 잠그는 기준.
+        # Snapshot — locks the file set so captures made during/after Make Video
+        # are not swept up by Archive Move.
         self.last_video_files = list(files)
         self.is_processing = True
         self._sync_menu()
@@ -448,7 +449,7 @@ class TimeCap(rumps.App):
             mode="w", suffix="_filelist.txt", delete=False
         ) as f:
             for fp in files:
-                # ffmpeg concat 리스트의 작은따옴표 이스케이프: ' → '\''
+                # escape single quotes for the ffmpeg concat list: ' → '\''
                 escaped = fp.replace("'", "'\\''")
                 f.write(f"file '{escaped}'\n")
             list_path = f.name
@@ -471,7 +472,8 @@ class TimeCap(rumps.App):
                 rumps.notification(
                     "TimeCap", "ffmpeg error", result.stderr.decode()[:120]
                 )
-                # 영상 생성 실패 — 스냅샷 무효화. Archive Move가 잘못된 기준으로 이동하지 않게.
+                # Video generation failed — invalidate the snapshot so Archive Move
+                # does not act on a stale file set.
                 self.last_video_files = []
         finally:
             if os.path.exists(list_path):
@@ -486,8 +488,9 @@ class TimeCap(rumps.App):
             rumps.notification("TimeCap", "Busy", "Another operation is in progress")
             return
 
-        # 직전 Make Video 결과가 있으면 그 시점 스냅샷만 archive (영상 이후 신규 캡처 제외).
-        # 없으면 fallback: screenshots/ 전체.
+        # If a Make Video snapshot exists, archive only that file set
+        # (excludes captures made after the video). Otherwise fall back to
+        # everything currently in screenshots/.
         if self.last_video_files:
             files = [f for f in self.last_video_files if os.path.exists(f)]
             scope = "last video snapshot"
@@ -510,7 +513,7 @@ class TimeCap(rumps.App):
         rumps.notification(
             "TimeCap", "Archive Move done", f"{moved} files moved ({scope})"
         )
-        # 스냅샷 소비 완료 — 같은 리스트가 두 번 적용되지 않게 초기화.
+        # Snapshot consumed — reset so the same list is never applied twice.
         self.last_video_files = []
         self.is_processing = False
         self.frame_count = len(FileManager.snapshot())
@@ -541,10 +544,10 @@ class TimeCap(rumps.App):
                 "· no network calls\n"
                 "· no external data transfer\n\n"
                 "View Source → verify yourself or ask AI\n\n"
-                "── 필요 권한 ──\n"
-                "· Screen Recording — 화면 캡처용\n"
-                "· Notifications — 완료 알림용\n"
-                "· Disk Access — selected folder 저장용"
+                "── Required permissions ──\n"
+                "· Screen Recording — for screen capture\n"
+                "· Notifications — for status alerts\n"
+                "· Disk Access — to save into the selected folder"
             )
         )
 
@@ -563,7 +566,7 @@ class TimeCap(rumps.App):
         return "🔔 Sound [ON]" if SOUND_ENABLED else "🔕 Sound [OFF]"
 
     def _restart_capture_timer(self):
-        """CAPTURE_INTERVAL 변경 시 안전한 재시작."""
+        """Safe timer restart when CAPTURE_INTERVAL changes."""
         was_running = self.is_capturing
         self._timer.stop()
         self._timer = rumps.Timer(self.capture_tick, CAPTURE_INTERVAL)
@@ -614,7 +617,7 @@ class TimeCap(rumps.App):
 
         result = subprocess.run(
             ["osascript", "-e",
-             'POSIX path of (choose folder with prompt "TimeCap 저장 폴더 선택")'],
+             'POSIX path of (choose folder with prompt "Choose TimeCap storage folder")'],
             capture_output=True, text=True
         )
         new_path = result.stdout.strip().rstrip("/")
@@ -628,8 +631,8 @@ class TimeCap(rumps.App):
             os.remove(test)
         except Exception:
             rumps.notification(
-                "TimeCap", "쓰기 권한 없음",
-                f"선택한 폴더에 저장할 수 없습니다:\n{new_path}"
+                "TimeCap", "No write permission",
+                f"Cannot save to the selected folder:\n{new_path}"
             )
             return
 
@@ -640,7 +643,7 @@ class TimeCap(rumps.App):
         self.storage_item.title = self._storage_title()
         save_config()
         self._sync_menu()
-        rumps.notification("TimeCap", "저장 폴더 변경", new_path)
+        rumps.notification("TimeCap", "Storage folder changed", new_path)
 
     # ── menubar sync ─────────────────────
 

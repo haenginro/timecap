@@ -6,21 +6,25 @@ archive/**/*.jpg
 # temp files
 _tc_*_filelist.txt
 
-# backup files (역사는 git log/show 로 충분)
+# backup files (history lives in git log/show)
 TimeCap.py.bak_*
 
-# 개인 설정 — base_dir 등 로컬 경로 포함, 추적 제외
+# personal config — contains local paths (base_dir), never tracked
 config.json
 
-# build artifacts
-build/
-dist/
+# internal Korean dev docs — local only
+TIMECAP.md
+TIMECAP_BACKLOG.md
 
-# local artifacts — 리포엔 icon_source.png + TimeCap.icns만 추적
+# local artifacts — only icon_source.png + TimeCap.icns are tracked
 timecap_archive.zip
 icon_source.jpg
 icon.iconset/
 logs/*.log
+
+# build artifacts
+build/
+dist/
 
 # system
 .DS_Store
@@ -30,3 +34,6 @@ logs/*.log
 !screenshots/.gitkeep
 !videos/.gitkeep
 !archive/.gitkeep
+
+# python
+__pycache__/
