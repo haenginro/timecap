@@ -1,0 +1,32 @@
+# captures & generated files
+screenshots/*.jpg
+videos/*.mp4
+archive/**/*.jpg
+
+# temp files
+_tc_*_filelist.txt
+
+# backup files (역사는 git log/show 로 충분)
+TimeCap.py.bak_*
+
+# 개인 설정 — base_dir 등 로컬 경로 포함, 추적 제외
+config.json
+
+# build artifacts
+build/
+dist/
+
+# local artifacts — 리포엔 icon_source.png + TimeCap.icns만 추적
+timecap_archive.zip
+icon_source.jpg
+icon.iconset/
+logs/*.log
+
+# system
+.DS_Store
+.claude/
+
+# keep empty folders
+!screenshots/.gitkeep
+!videos/.gitkeep
+!archive/.gitkeep
