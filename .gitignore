@@ -1,4 +1,5 @@
-# captures & generated files
+# captures & generated files — the app writes these under the storage folder you
+# pick, never into the repo. Kept as a guard in case someone points it here.
 screenshots/*.jpg
 videos/*.mp4
 archive/**/*.jpg
@@ -9,10 +10,12 @@ _tc_*_filelist.txt
 # backup files (history lives in git log/show)
 TimeCap.py.bak_*
 
-# personal config — contains local paths (base_dir), never tracked
+# personal config — now lives in ~/Library/Application Support/TimeCap/.
+# Kept here to catch the legacy source-adjacent file, which is never tracked.
 config.json
 
 # internal Korean dev docs — local only
+CLAUDE.md
 TIMECAP.md
 TIMECAP_BACKLOG.md
 
@@ -30,11 +33,6 @@ dist*/
 # system
 .DS_Store
 .claude/
-
-# keep empty folders
-!screenshots/.gitkeep
-!videos/.gitkeep
-!archive/.gitkeep
 
 # python
 __pycache__/
