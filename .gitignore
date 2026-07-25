@@ -24,7 +24,8 @@ logs/*.log
 
 # build artifacts
 build/
-dist/
+dist*/
+.venv/
 
 # system
 .DS_Store

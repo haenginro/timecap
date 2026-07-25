@@ -39,9 +39,15 @@ def _find_ffmpeg():
 
 FFMPEG = _find_ffmpeg()
 
-CONFIG_PATH    = os.path.join(os.path.dirname(SOURCE_FILE), "config.json")
+# Settings live outside the app, in the standard macOS location. Older versions
+# kept config.json next to TimeCap.py — which lands *inside* the .app bundle once
+# packaged, so every settings change would break the code signature.
+CONFIG_DIR     = os.path.expanduser("~/Library/Application Support/TimeCap")
+CONFIG_PATH    = os.path.join(CONFIG_DIR, "config.json")
+LEGACY_CONFIG  = os.path.join(os.path.dirname(SOURCE_FILE), "config.json")
+
 DEFAULT_CONFIG = {
-    "capture_interval": 10,
+    "capture_interval": 15,
     "idle_threshold":   300,
     "idle_mode":        "skip",
     "sound_enabled":    True,
@@ -49,8 +55,21 @@ DEFAULT_CONFIG = {
 }
 
 
+def migrate_legacy_config():
+    """Copy a pre-existing source-adjacent config into CONFIG_PATH, once.
+    Copy, not move — the old file may sit inside a signed bundle we cannot write to."""
+    if os.path.exists(CONFIG_PATH) or not os.path.exists(LEGACY_CONFIG):
+        return
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        shutil.copyfile(LEGACY_CONFIG, CONFIG_PATH)
+    except Exception:
+        pass
+
+
 def load_config():
     """Load config.json; fall back to DEFAULT_CONFIG if missing or broken."""
+    migrate_legacy_config()
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH) as f:

@@ -50,11 +50,13 @@ macOS will require:
 
 ## Storage note
 
-Frames are full-resolution JPEGs (~0.5 MB each on a Retina display). At a 10 s interval that is roughly **200 MB per hour** — point the storage folder at a disk with room, and use Archive Move / delete old months regularly.
+Frames are full-resolution JPEGs (~0.5 MB each on a Retina display). At the default 15 s interval that is roughly **120 MB per hour** — point the storage folder at a disk with room, and use Archive Move / delete old months regularly.
 
 ## Configuration
 
-Settings live in `config.json` next to `TimeCap.py` (created on first change): capture interval, idle threshold, sound on/off, storage folder. Everything is editable from the menu bar — no need to touch the file.
+Settings live in `~/Library/Application Support/TimeCap/config.json` (created on first change): capture interval, idle threshold, sound on/off, storage folder. Everything is editable from the menu bar — no need to touch the file.
+
+If you ran an older version that kept `config.json` next to `TimeCap.py`, it is copied over automatically the first time you launch the new one.
 
 ## License
 
