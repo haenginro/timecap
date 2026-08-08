@@ -26,6 +26,8 @@ TimeCap follows a "naked code" philosophy — the entire app is one readable Pyt
 - [ffmpeg](https://ffmpeg.org) for video generation: `brew install ffmpeg`
 - To run from source: Python 3 with [`rumps`](https://github.com/jaredks/rumps) (`pip install rumps`)
 
+Make Video requires at least 30 frames. Until then, the menu continuously shows the remaining number of frames and repeats it in the click notification.
+
 ## Run
 
 From source:

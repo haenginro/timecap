@@ -459,10 +459,11 @@ class TimeCap(rumps.App):
         files = FileManager.snapshot()
 
         if len(files) < MIN_FRAMES:
+            needed = MIN_FRAMES - len(files)
             rumps.notification(
                 "TimeCap",
-                "Not enough frames",
-                f"{len(files)} captured — need at least {MIN_FRAMES}"
+                f"Need {needed} more frame{'s' if needed != 1 else ''}",
+                f"{len(files)} captured — Make Video starts at {MIN_FRAMES}"
             )
             return
 
@@ -734,6 +735,15 @@ class TimeCap(rumps.App):
     def _sync_menu(self):
         err  = "! " if self.fail_count > 0 else ""
         proc = "⏳" if self.is_processing else ""
+        needed = max(0, MIN_FRAMES - self.frame_count)
+
+        if self.is_processing:
+            self.video_item.title = "Make Video (processing)"
+        elif needed:
+            self.video_item.title = f"Make Video ({needed} more frames)"
+        else:
+            self.video_item.title = "Make Video"
+
         if self.is_capturing:
             if self.is_idle:
                 cap = f"⏸ TC {self.frame_count}"
@@ -753,7 +763,10 @@ class TimeCap(rumps.App):
         elif err or proc or self.is_capturing:
             self.status_item.title = label
         else:
-            self.status_item.title = "TC — idle"
+            if needed:
+                self.status_item.title = f"TC — {needed} more frames needed for video"
+            else:
+                self.status_item.title = "TC — ready for video"
 
 
 # ─────────────────────────────────────────
