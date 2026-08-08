@@ -198,30 +198,60 @@ class FileManager:
         return files
 
     @staticmethod
-    def get_archive_dir(month_str):
-        """Return archive/YYYYMM/ path, create if missing."""
-        path = os.path.join(FileManager.archive_dir(), month_str)
+    def video_archive_path(video_path, created_at):
+        """Return archive/YYYY-MM/<video filename>/ for one created video."""
+        month = created_at.strftime("%Y-%m")
+        return os.path.join(
+            FileManager.archive_dir(), month, os.path.basename(video_path)
+        )
+
+    @staticmethod
+    def get_video_archive_dir(video_path, created_at):
+        """Return the video archive path, creating it if needed."""
+        path = FileManager.video_archive_path(video_path, created_at)
         os.makedirs(path, exist_ok=True)
         return path
 
     @staticmethod
-    def move_to_archive(files):
-        """Move jpg files to archive/YYYYMM/ based on filename date."""
+    def move_to_archive(files, archive_path):
+        """Move jpg files into one video-specific archive folder.
+
+        Returns (moved, failed). A failed move leaves its original frame in
+        screenshots/ so it can be retried manually.
+        """
         moved = 0
+        failed = 0
         for filepath in files:
             fname = os.path.basename(filepath)
-            # tc_YYYYMMDD_HHMMSS.jpg → YYYYMM
-            try:
-                month_str = fname[3:11][:6]   # "tc_20260404_..." → "202604"
-            except IndexError:
-                month_str = datetime.now().strftime("%Y%m")
-
-            dest_dir = FileManager.get_archive_dir(month_str)
-            dest = os.path.join(dest_dir, fname)
+            dest = os.path.join(archive_path, fname)
             if os.path.exists(filepath):
-                shutil.move(filepath, dest)
-                moved += 1
-        return moved
+                try:
+                    shutil.move(filepath, dest)
+                    moved += 1
+                except OSError:
+                    failed += 1
+        return moved, failed
+
+    @staticmethod
+    def write_manifest(archive_path, video_path, files, created_at):
+        """Write a small, human-readable description of one video archive."""
+        names = [os.path.basename(path) for path in files]
+
+        def frame_time(name):
+            try:
+                return datetime.strptime(name[3:18], "%Y%m%d_%H%M%S").strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+            except ValueError:
+                return name
+
+        manifest_path = os.path.join(archive_path, "manifest.txt")
+        with open(manifest_path, "w") as f:
+            f.write(f"video: {os.path.basename(video_path)}\n")
+            f.write(f"created: {created_at.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"frames: {len(files)}\n")
+            f.write(f"first_frame: {frame_time(names[0])}\n")
+            f.write(f"last_frame: {frame_time(names[-1])}\n")
 
 
 # ─────────────────────────────────────────
@@ -241,7 +271,8 @@ class TimeCap(rumps.App):
         self.fail_count    = 0
         self.skip_count    = 0       # frames skipped due to idle
         self._skip_logged  = False   # log idle-skip entry only once — avoids log flooding
-        self.last_video_files = []   # file snapshot at Make Video time — guards Archive Move race
+        self.last_video_files = []   # frames left after latest video's auto archive
+        self.last_video_archive = None  # destination for a manual retry
 
         # menu items
         self.status_item  = rumps.MenuItem("TC — idle",      callback=None)
@@ -436,7 +467,7 @@ class TimeCap(rumps.App):
             return
 
         # Snapshot — locks the file set so captures made during/after Make Video
-        # are not swept up by Archive Move.
+        # are not swept up by this video's archive.
         self.last_video_files = list(files)
         self.is_processing = True
         self._sync_menu()
@@ -485,8 +516,32 @@ class TimeCap(rumps.App):
                 out
             ], capture_output=True)
 
-            if result.returncode == 0:
-                rumps.notification("TimeCap", "Video ready", os.path.basename(out))
+            video_ready = (
+                result.returncode == 0
+                and os.path.isfile(out)
+                and os.path.getsize(out) > 0
+            )
+
+            if video_ready:
+                # Archive only the snapshot passed to ffmpeg. Captures made while
+                # the video was rendering stay in screenshots/ for the next video.
+                created_at = datetime.now()
+                archive_path = FileManager.video_archive_path(out, created_at)
+                try:
+                    archive_path = FileManager.get_video_archive_dir(out, created_at)
+                    FileManager.write_manifest(archive_path, out, files, created_at)
+                    moved, failed = FileManager.move_to_archive(files, archive_path)
+                except OSError:
+                    moved, failed = 0, len(files)
+                remaining = [f for f in files if os.path.exists(f)]
+                self.last_video_files = remaining
+                self.last_video_archive = archive_path if remaining else None
+                self.frame_count = len(FileManager.snapshot())
+
+                detail = f"Video created: 1 / Frames archived: {moved}"
+                if failed:
+                    detail += f" ({failed} kept for manual retry)"
+                rumps.notification("TimeCap", "Video ready", detail)
             else:
                 rumps.notification(
                     "TimeCap", "ffmpeg error", result.stderr.decode()[:120]
@@ -494,6 +549,7 @@ class TimeCap(rumps.App):
                 # Video generation failed — invalidate the snapshot so Archive Move
                 # does not act on a stale file set.
                 self.last_video_files = []
+                self.last_video_archive = None
         finally:
             if os.path.exists(list_path):
                 os.remove(list_path)
@@ -507,33 +563,42 @@ class TimeCap(rumps.App):
             rumps.notification("TimeCap", "Busy", "Another operation is in progress")
             return
 
-        # If a Make Video snapshot exists, archive only that file set
-        # (excludes captures made after the video). Otherwise fall back to
-        # everything currently in screenshots/.
-        if self.last_video_files:
+        # Manual Archive Move is a retry tool. It only moves remaining frames from
+        # the latest successful video, never newer captures without a video.
+        if self.last_video_files and self.last_video_archive:
             files = [f for f in self.last_video_files if os.path.exists(f)]
-            scope = "last video snapshot"
+            archive_path = self.last_video_archive
         else:
-            files = FileManager.snapshot()
-            scope = "all current frames"
+            files = []
+            archive_path = None
 
         if not files:
-            rumps.notification("TimeCap", "Archive Move", "No files to archive")
+            rumps.notification(
+                "TimeCap", "Archive Move",
+                "No remaining frames from the latest video"
+            )
             return
 
         self.is_processing = True
         thread = threading.Thread(
-            target=self._run_archive_move, args=(files, scope), daemon=True
+            target=self._run_archive_move, args=(files, archive_path), daemon=True
         )
         thread.start()
 
-    def _run_archive_move(self, files, scope="all"):
-        moved = FileManager.move_to_archive(files)
+    def _run_archive_move(self, files, archive_path):
+        try:
+            os.makedirs(archive_path, exist_ok=True)
+            moved, failed = FileManager.move_to_archive(files, archive_path)
+        except OSError:
+            moved, failed = 0, len(files)
+        detail = f"Frames archived: {moved}"
+        if failed:
+            detail += f" / {failed} failed"
         rumps.notification(
-            "TimeCap", "Archive Move done", f"{moved} files moved ({scope})"
+            "TimeCap", "Archive Move done", detail
         )
-        # Snapshot consumed — reset so the same list is never applied twice.
-        self.last_video_files = []
+        self.last_video_files = [f for f in files if os.path.exists(f)]
+        self.last_video_archive = archive_path if self.last_video_files else None
         self.is_processing = False
         self.frame_count = len(FileManager.snapshot())
         self._sync_menu()

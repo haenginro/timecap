@@ -16,8 +16,8 @@ TimeCap follows a "naked code" philosophy — the entire app is one readable Pyt
 
 - ⏱ Configurable capture interval (10 / 15 / 30 / 60 s)
 - ⏸ Idle detection — pauses capture when you're away, resumes with a sound cue
-- 🎬 Make Video — assembles captured frames into an mp4 timelapse (ffmpeg)
-- 🗂 Archive Move — moves used frames into monthly `archive/YYYYMM/` folders
+- 🎬 Make Video — assembles captured frames into an mp4 timelapse (ffmpeg), then automatically archives the frames used beside a manifest
+- 🗂 Archive Move — retries frames that could not be archived automatically
 - 📁 Storage picker — keep captures on any folder / external drive
 
 ## Requirements
@@ -57,6 +57,25 @@ Frames are full-resolution JPEGs (~0.5 MB each on a Retina display). At the defa
 Settings live in `~/Library/Application Support/TimeCap/config.json` (created on first change): capture interval, idle threshold, sound on/off, storage folder. Everything is editable from the menu bar — no need to touch the file.
 
 If you ran an older version that kept `config.json` next to `TimeCap.py`, it is copied over automatically the first time you launch the new one.
+
+## Workflow principle
+
+Making a video and handling its source frames used to be separate actions. In regular use, that separation added a repeat click and made it easy to leave already-consumed frames behind.
+
+TimeCap now treats a successfully created video as the trigger to archive exactly the frame snapshot used to make it. It verifies that ffmpeg succeeded and produced a non-empty video file before moving anything. If rendering fails or is interrupted, the source frames stay in `screenshots/`. Frames captured while the video is rendering are also left there for the next video.
+
+The archive unit is the video, not a capture date. Each successful video creates this self-describing folder; the month comes from the video's creation time, so a recording that crosses midnight has one home.
+
+```
+archive/
+└── 2026-08/
+    └── tc_20260808_144744_4fps.mp4/
+        ├── manifest.txt
+        ├── tc_20260808_144744.jpg
+        └── tc_20260808_144759.jpg
+```
+
+`manifest.txt` records the video filename, creation time, frame count, and first/last frame timestamps. It is a human-readable folder description, not a database. `Archive Move` remains available only to retry frames from the latest video that could not be moved automatically; it never sweeps up newer, unassociated captures.
 
 ## License
 
