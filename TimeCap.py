@@ -12,6 +12,7 @@ macOS screen timelapse capture & video generator
 
 import json
 import os
+import queue
 import shutil
 import subprocess
 import tempfile
@@ -55,6 +56,19 @@ DEFAULT_CONFIG = {
 }
 
 
+def log_event(event):
+    """Append one line to <base_dir>/logs/tc_YYYYMMDD.log. Never raises."""
+    try:
+        base = globals().get("BASE_DIR") or DEFAULT_CONFIG["base_dir"]
+        logs = os.path.join(base, "logs")
+        os.makedirs(logs, exist_ok=True)
+        log_path = os.path.join(logs, f"tc_{datetime.now().strftime('%Y%m%d')}.log")
+        with open(log_path, "a") as f:
+            f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {event}\n")
+    except Exception:
+        pass
+
+
 def migrate_legacy_config():
     """Copy a pre-existing source-adjacent config into CONFIG_PATH, once.
     Copy, not move — the old file may sit inside a signed bundle we cannot write to."""
@@ -63,8 +77,8 @@ def migrate_legacy_config():
     try:
         os.makedirs(CONFIG_DIR, exist_ok=True)
         shutil.copyfile(LEGACY_CONFIG, CONFIG_PATH)
-    except Exception:
-        pass
+    except Exception as e:
+        log_event(f"CONFIG_MIGRATE_FAIL {e}")
 
 
 def load_config():
@@ -74,8 +88,8 @@ def load_config():
         try:
             with open(CONFIG_PATH) as f:
                 return {**DEFAULT_CONFIG, **json.load(f)}
-        except Exception:
-            pass
+        except Exception as e:
+            log_event(f"CONFIG_LOAD_FAIL {e}")
     return DEFAULT_CONFIG.copy()
 
 
@@ -91,8 +105,8 @@ def save_config():
                 "sound_enabled":    SOUND_ENABLED,
                 "base_dir":         BASE_DIR,
             }, f, indent=2)
-    except Exception:
-        pass
+    except Exception as e:
+        log_event(f"CONFIG_SAVE_FAIL {e}")
 
 
 _cfg = load_config()
@@ -100,18 +114,19 @@ CAPTURE_INTERVAL = _cfg["capture_interval"]   # seconds between captures (mutabl
 MIN_FRAMES       = 30                          # minimum frames required for video
 FPS              = 4                           # output video framerate
 IDLE_THRESHOLD   = _cfg["idle_threshold"]      # seconds — pause capture when user idle longer (mutable via menu)
-IDLE_MODE        = _cfg["idle_mode"]           # skip | compress | label  (compress/label: not implemented, same as skip)
+IDLE_MODE        = "skip"                      # only implemented idle behavior
 SOUND_ENABLED    = _cfg["sound_enabled"]       # sound cue on pause/resume
 BASE_DIR         = _cfg["base_dir"]            # storage folder — change via Storage menu
 
 IDLE_POLL_INTERVAL = 1      # idle polling interval (s) — minimizes resume delay
+UI_POLL_INTERVAL   = 0.2    # drain worker → UI callbacks on the main thread
 
 INTERVAL_CHOICES  = [10, 15, 30, 60]             # capture interval choices (s)
 IDLE_CHOICES_SEC  = [30, 60, 180, 300, 600]      # idle threshold choices (s) = 30s/1m/3m/5m/10m
-IDLE_MODE_CHOICES = ["skip", "compress", "label"]
 
 PAUSE_SOUND  = "/System/Library/Sounds/Tink.aiff"
 RESUME_SOUND = "/System/Library/Sounds/Pop.aiff"
+_idle_probe_logged = False
 
 
 def _fmt_seconds(sec):
@@ -122,6 +137,7 @@ def _fmt_seconds(sec):
 
 def get_idle_seconds():
     """System idle time in seconds, from ioreg HIDIdleTime."""
+    global _idle_probe_logged
     try:
         result = subprocess.run(
             ["ioreg", "-c", "IOHIDSystem"],
@@ -131,8 +147,10 @@ def get_idle_seconds():
             if "HIDIdleTime" in line:
                 idle_ns = int(line.split("=")[-1].strip())
                 return idle_ns / 1_000_000_000
-    except Exception:
-        pass
+    except Exception as e:
+        if not _idle_probe_logged:
+            _idle_probe_logged = True
+            log_event(f"IDLE_PROBE_FAIL {e}")
     return 0
 
 
@@ -148,8 +166,8 @@ def play_sound(event: str):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            log_event(f"SOUND_FAIL {e}")
 
 
 # ─────────────────────────────────────────

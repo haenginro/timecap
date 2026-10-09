@@ -10,6 +10,10 @@ OPTIONS = {
         "CFBundleVersion": "1.2",
         "CFBundleShortVersionString": "1.2",
         "LSUIElement": True,  # menu bar app — no dock icon
+        "NSScreenCaptureUsageDescription": (
+            "TimeCap captures the screen at an interval you choose "
+            "to build a local timelapse. Frames stay on your disk."
+        ),
     },
     "iconfile": "TimeCap.icns",
     "packages": ["rumps"],
