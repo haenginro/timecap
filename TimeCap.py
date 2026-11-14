@@ -509,6 +509,7 @@ class TimeCap(rumps.App):
         self.storage_down = False
         self.is_capturing = True
         self.is_idle      = False
+        self.fail_count   = 0
         self.frame_count  = len(FileManager.snapshot())
         self._timer.start()
         self._idle_timer.start()
@@ -520,6 +521,7 @@ class TimeCap(rumps.App):
             return
         self.is_capturing = False
         self.is_idle      = False
+        self.fail_count   = 0       # the "!" marker describes a running capture only
         self._timer.stop()
         self._idle_timer.stop()
         log_event(f"CAPTURE_STOP frames={self.frame_count}")
@@ -585,14 +587,18 @@ class TimeCap(rumps.App):
         if result.returncode == 0:
             self._skip_logged = False
             self.frame_count += 1
+            if self.fail_count:
+                log_event(f"CAPTURE_OK after {self.fail_count} failed")
             self.fail_count   = 0
             self._sync_menu()
         else:
             self._skip_logged = False
             self.fail_count += 1
-            log_event(f"CAPTURE_FAIL rc={result.returncode} {_last_lines(result.stderr, 1)}")
             self._sync_menu()
             if self.fail_count == 1:
+                # Logged and notified once per failure streak, not once per tick;
+                # CAPTURE_OK / CAPTURE_STOP closes the streak in the log.
+                log_event(f"CAPTURE_FAIL rc={result.returncode} {_last_lines(result.stderr, 1)}")
                 rumps.notification(
                     "TimeCap", "Capture failed",
                     "Check Screen Recording permission: System Settings → Privacy & Security → Screen Recording"

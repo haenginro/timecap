@@ -213,11 +213,32 @@ class Capture(Base):
         with mock.patch.object(tc.subprocess, "run", return_value=failed), \
              mock.patch.object(tc.subprocess, "Popen"):
             app.capture_tick(None)
-        self.assertEqual(app.fail_count, 1)
-        self.assertIn(
-            "CAPTURE_FAIL rc=1 could not create image from display",
-            read_logs(os.path.join(self.base, "logs")),
+            app.capture_tick(None)
+            app.capture_tick(None)
+        self.assertEqual(app.fail_count, 3)
+        self.assertTrue(app.title.startswith("! "))
+        logs = read_logs(os.path.join(self.base, "logs"))
+        self.assertEqual(                           # once per streak, with the reason
+            logs.count("CAPTURE_FAIL rc=1 could not create image from display"), 1
         )
+        self.assertEqual(len(NOTIFICATIONS), 1)
+
+        ok = subprocess.CompletedProcess([], 0, b"", b"")
+        with mock.patch.object(tc.subprocess, "run", return_value=ok):
+            app.capture_tick(None)
+        self.assertEqual(app.fail_count, 0)
+        self.assertIn("CAPTURE_OK after 3 failed", read_logs(os.path.join(self.base, "logs")))
+
+    def test_stop_clears_failure_marker(self):
+        app = tc.TimeCap()
+        app.start_capture(None)
+        failed = subprocess.CompletedProcess([], 1, b"", b"denied\n")
+        with mock.patch.object(tc.subprocess, "run", return_value=failed), \
+             mock.patch.object(tc.subprocess, "Popen"):
+            app.capture_tick(None)
+        self.assertTrue(app.title.startswith("! "))
+        app.stop_capture(None)
+        self.assertFalse(app.title.startswith("! "))
 
     def test_start_stop_are_logged(self):
         app = tc.TimeCap()
