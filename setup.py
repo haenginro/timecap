@@ -7,8 +7,8 @@ OPTIONS = {
         "CFBundleName": "TimeCap",
         "CFBundleDisplayName": "TimeCap",
         "CFBundleIdentifier": "com.haenginro.timecap",
-        "CFBundleVersion": "1.2",
-        "CFBundleShortVersionString": "1.2",
+        "CFBundleVersion": "1.2.2",
+        "CFBundleShortVersionString": "1.2.2",
         "LSUIElement": True,  # menu bar app — no dock icon
         "NSScreenCaptureUsageDescription": (
             "TimeCap captures the screen at an interval you choose "

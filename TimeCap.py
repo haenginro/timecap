@@ -10,6 +10,8 @@ macOS screen timelapse capture & video generator
 · source: View Source → verify yourself or ask AI
 """
 
+import collections
+import fcntl
 import json
 import os
 import queue
@@ -45,28 +47,51 @@ FFMPEG = _find_ffmpeg()
 # packaged, so every settings change would break the code signature.
 CONFIG_DIR     = os.path.expanduser("~/Library/Application Support/TimeCap")
 CONFIG_PATH    = os.path.join(CONFIG_DIR, "config.json")
+LOCK_PATH      = os.path.join(CONFIG_DIR, "timecap.lock")
 LEGACY_CONFIG  = os.path.join(os.path.dirname(SOURCE_FILE), "config.json")
 
 DEFAULT_CONFIG = {
     "capture_interval": 15,
     "idle_threshold":   300,
-    "idle_mode":        "skip",
     "sound_enabled":    True,
     "base_dir":         os.path.expanduser("~/timecap"),
 }
 
 
+def volume_missing(path):
+    """Return the unmounted /Volumes/<name> that `path` lives on, or None.
+
+    Creating folders under a missing volume would either fail or quietly write
+    to the boot disk — so every write path asks this first.
+    """
+    parts = path.split("/")
+    if len(parts) > 2 and parts[1] == "Volumes" and parts[2]:
+        volume = "/".join(parts[:3])
+        if not os.path.ismount(volume):
+            return volume
+    return None
+
+
 def log_event(event):
-    """Append one line to <base_dir>/logs/tc_YYYYMMDD.log. Never raises."""
-    try:
-        base = globals().get("BASE_DIR") or DEFAULT_CONFIG["base_dir"]
-        logs = os.path.join(base, "logs")
-        os.makedirs(logs, exist_ok=True)
-        log_path = os.path.join(logs, f"tc_{datetime.now().strftime('%Y%m%d')}.log")
-        with open(log_path, "a") as f:
-            f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {event}\n")
-    except Exception:
-        pass
+    """Append one line to <base_dir>/logs/tc_YYYYMMDD.log. Never raises.
+
+    When the storage folder is unreachable (external drive unplugged), the line
+    goes to ~/Library/Application Support/TimeCap/logs/ instead — so the outage
+    itself is on record.
+    """
+    now = datetime.now()
+    line = f"{now.strftime('%Y-%m-%d %H:%M:%S')} {event}\n"
+    base = globals().get("BASE_DIR") or DEFAULT_CONFIG["base_dir"]
+    for logs in (os.path.join(base, "logs"), os.path.join(CONFIG_DIR, "logs")):
+        if volume_missing(logs):
+            continue
+        try:
+            os.makedirs(logs, exist_ok=True)
+            with open(os.path.join(logs, f"tc_{now.strftime('%Y%m%d')}.log"), "a") as f:
+                f.write(line)
+            return
+        except Exception:
+            continue
 
 
 def migrate_legacy_config():
@@ -101,7 +126,6 @@ def save_config():
             json.dump({
                 "capture_interval": CAPTURE_INTERVAL,
                 "idle_threshold":   IDLE_THRESHOLD,
-                "idle_mode":        IDLE_MODE,
                 "sound_enabled":    SOUND_ENABLED,
                 "base_dir":         BASE_DIR,
             }, f, indent=2)
@@ -109,12 +133,31 @@ def save_config():
         log_event(f"CONFIG_SAVE_FAIL {e}")
 
 
+def acquire_instance_lock():
+    """Hold an exclusive lock for the life of the process.
+
+    Returns the open lock file, or None when another TimeCap already holds it —
+    two instances would capture into the same folder twice.
+    """
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        handle = open(LOCK_PATH, "w")
+    except OSError as e:
+        log_event(f"LOCK_SKIPPED {e}")
+        return True   # cannot check — do not block the app over it
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
 _cfg = load_config()
 CAPTURE_INTERVAL = _cfg["capture_interval"]   # seconds between captures (mutable via menu)
 MIN_FRAMES       = 30                          # minimum frames required for video
 FPS              = 4                           # output video framerate
-IDLE_THRESHOLD   = _cfg["idle_threshold"]      # seconds — pause capture when user idle longer (mutable via menu)
-IDLE_MODE        = "skip"                      # only implemented idle behavior
+IDLE_THRESHOLD   = _cfg["idle_threshold"]      # seconds — skip capture when user idle longer (mutable via menu)
 SOUND_ENABLED    = _cfg["sound_enabled"]       # sound cue on pause/resume
 BASE_DIR         = _cfg["base_dir"]            # storage folder — change via Storage menu
 
@@ -133,6 +176,13 @@ def _fmt_seconds(sec):
     if sec < 60:
         return f"{sec}s"
     return f"{sec // 60}m"
+
+
+def _last_lines(raw, count=3):
+    """Last non-empty lines of a tool's stderr — where the actual error is."""
+    text = raw.decode(errors="replace") if isinstance(raw, bytes) else (raw or "")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return " | ".join(lines[-count:])
 
 
 def get_idle_seconds():
@@ -170,6 +220,31 @@ def play_sound(event: str):
             log_event(f"SOUND_FAIL {e}")
 
 
+def jpeg_size(path):
+    """Return (width, height) read from a JPEG header, or None if unreadable."""
+    try:
+        with open(path, "rb") as f:
+            if f.read(2) != b"\xff\xd8":
+                return None
+            while True:
+                head = f.read(4)
+                if len(head) < 4 or head[0] != 0xFF:
+                    return None
+                marker = head[1]
+                length = int.from_bytes(head[2:4], "big")
+                # SOF0–SOF15 carry the frame size (C4 / C8 / CC are other tables)
+                if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                    data = f.read(5)
+                    if len(data) < 5:
+                        return None
+                    height = int.from_bytes(data[1:3], "big")
+                    width  = int.from_bytes(data[3:5], "big")
+                    return (width, height)
+                f.seek(length - 2, 1)
+    except OSError:
+        return None
+
+
 # ─────────────────────────────────────────
 # Block 0 — FileManager
 # ─────────────────────────────────────────
@@ -195,6 +270,23 @@ class FileManager:
             os.makedirs(d, exist_ok=True)
 
     @staticmethod
+    def storage_problem():
+        """Return None when the storage folder is usable, else a short reason.
+
+        Never creates folders on a volume that is not mounted.
+        """
+        volume = volume_missing(BASE_DIR)
+        if volume:
+            return f"volume not mounted: {volume}"
+        try:
+            FileManager.ensure_dirs()
+        except OSError as e:
+            return f"cannot create folders: {e}"
+        if not os.access(FileManager.screenshots_dir(), os.W_OK):
+            return "folder not writable"
+        return None
+
+    @staticmethod
     def new_capture_path():
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return os.path.join(FileManager.screenshots_dir(), f"tc_{stamp}.jpg")
@@ -206,14 +298,38 @@ class FileManager:
 
     @staticmethod
     def snapshot():
-        """Return sorted list of jpg files currently in screenshots/."""
+        """Return sorted list of jpg files currently in screenshots/.
+
+        Empty when the folder cannot be read (e.g. external drive unplugged).
+        """
         d = FileManager.screenshots_dir()
+        try:
+            names = os.listdir(d)
+        except OSError:
+            return []
         files = sorted([
             os.path.join(d, f)
-            for f in os.listdir(d)
+            for f in names
             if f.startswith("tc_") and f.endswith(".jpg")
         ])
         return files
+
+    @staticmethod
+    def video_size(files):
+        """Pick one output size for a video: the most common frame size, made even.
+
+        Frames can differ in size when the display setup changed mid-recording.
+        Returns None if no frame header could be read.
+        """
+        sizes = collections.Counter()
+        for path in files:
+            size = jpeg_size(path)
+            if size:
+                sizes[size] += 1
+        if not sizes:
+            return None
+        width, height = sizes.most_common(1)[0][0]
+        return (width - width % 2, height - height % 2)   # yuv420p needs even sides
 
     @staticmethod
     def video_archive_path(video_path, created_at):
@@ -235,7 +351,8 @@ class FileManager:
         """Move jpg files into one video-specific archive folder.
 
         Returns (moved, failed). A failed move leaves its original frame in
-        screenshots/ so it can be retried manually.
+        screenshots/ so it can be retried manually. An existing file in the
+        archive is never overwritten.
         """
         moved = 0
         failed = 0
@@ -243,6 +360,9 @@ class FileManager:
             fname = os.path.basename(filepath)
             dest = os.path.join(archive_path, fname)
             if os.path.exists(filepath):
+                if os.path.exists(dest):
+                    failed += 1
+                    continue
                 try:
                     shutil.move(filepath, dest)
                     moved += 1
@@ -280,17 +400,19 @@ class TimeCap(rumps.App):
 
     def __init__(self):
         super().__init__("TC")
-        FileManager.ensure_dirs()
 
         self.is_capturing  = False
         self.is_processing = False   # guard: Make Video / Archive Move
         self.is_idle       = False   # user is away (capture paused)
+        self.storage_down  = FileManager.storage_problem() is not None
         self.frame_count   = len(FileManager.snapshot())
         self.fail_count    = 0
         self.skip_count    = 0       # frames skipped due to idle
         self._skip_logged  = False   # log idle-skip entry only once — avoids log flooding
         self.last_video_files = []   # frames left after latest video's auto archive
         self.last_video_archive = None  # destination for a manual retry
+        self._ui_queue     = queue.Queue()   # worker thread → main thread callbacks
+        self._worker       = None
 
         # menu items
         self.status_item  = rumps.MenuItem("TC — idle",      callback=None)
@@ -324,19 +446,6 @@ class TimeCap(rumps.App):
             self.idle_menu.add(item)
             self.idle_items[sec] = item
 
-        self.mode_items = {}
-        self.mode_menu  = rumps.MenuItem(self._mode_title())
-        for mode in IDLE_MODE_CHOICES:
-            implemented = (mode == "skip")
-            label = mode if implemented else f"{mode} (not implemented)"
-            # compress / label — future work; disabled for now (callback=None).
-            cb = (lambda s, v=mode: self.set_idle_mode(v)) if implemented else None
-            item = rumps.MenuItem(label, callback=cb)
-            if mode == IDLE_MODE:
-                item.state = 1
-            self.mode_menu.add(item)
-            self.mode_items[mode] = item
-
         self.sound_item = rumps.MenuItem(
             self._sound_title(),
             callback=self.toggle_sound,
@@ -352,7 +461,6 @@ class TimeCap(rumps.App):
             None,
             self.interval_menu,
             self.idle_menu,
-            self.mode_menu,
             self.sound_item,
             self.storage_item,
             None,
@@ -373,19 +481,38 @@ class TimeCap(rumps.App):
         # timers — created but not started
         self._timer       = rumps.Timer(self.capture_tick,    CAPTURE_INTERVAL)
         self._idle_timer  = rumps.Timer(self.idle_check_tick, IDLE_POLL_INTERVAL)
+        self._ui_timer    = rumps.Timer(self._drain_ui,       UI_POLL_INTERVAL)
 
+        if self.storage_down:
+            log_event(f"STORAGE_UNAVAILABLE at launch: {FileManager.storage_problem()}")
         self._sync_menu()
+
+    # ── storage guard ────────────────────
+
+    def _storage_blocked(self):
+        """True (and tells the user) when the storage folder cannot be used right now."""
+        problem = FileManager.storage_problem()
+        if not problem:
+            return False
+        rumps.notification("TimeCap", "Storage unavailable", f"{BASE_DIR}\n{problem}")
+        self.storage_down = True
+        self._sync_menu()
+        return True
 
     # ── Block 1 — Capture ────────────────
 
     def start_capture(self, _):
         if self.is_capturing:
             return
+        if self._storage_blocked():
+            return
+        self.storage_down = False
         self.is_capturing = True
         self.is_idle      = False
         self.frame_count  = len(FileManager.snapshot())
         self._timer.start()
         self._idle_timer.start()
+        log_event(f"CAPTURE_START interval={CAPTURE_INTERVAL}s")
         self._sync_menu()
 
     def stop_capture(self, _):
@@ -395,6 +522,7 @@ class TimeCap(rumps.App):
         self.is_idle      = False
         self._timer.stop()
         self._idle_timer.stop()
+        log_event(f"CAPTURE_STOP frames={self.frame_count}")
         self._sync_menu()
 
     def idle_check_tick(self, _):
@@ -410,28 +538,34 @@ class TimeCap(rumps.App):
             play_sound("resume")
         self._sync_menu()
 
-    def _log_event(self, event):
-        """Append one line to logs/tc_YYYYMMDD.log. App continues on write failure."""
-        stamp = datetime.now().strftime("%Y%m%d")
-        log_path = os.path.join(FileManager.logs_dir(), f"tc_{stamp}.log")
-        try:
-            with open(log_path, "a") as f:
-                f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {event}\n")
-        except Exception:
-            pass
-
     def capture_tick(self, _):
         # idle_check_tick maintains self.is_idle via 1 s polling — just trust it here.
         if self.is_idle:
-            # IDLE_MODE: skip (default) / compress / label
-            # compress and label are not implemented — behave like skip for now
             if not self._skip_logged:
                 # entering idle-skip span — log once (per-tick logging would flood).
-                self._log_event("CAPTURE_SKIP idle=True")
+                log_event("CAPTURE_SKIP idle=True")
                 self._skip_logged = True
             self.skip_count += 1
             self._sync_menu()
             return
+
+        # Storage gone (external drive unplugged)? Wait quietly and resume when it
+        # is back. Logged and notified once per outage, not once per tick.
+        problem = FileManager.storage_problem()
+        if problem:
+            if not self.storage_down:
+                self.storage_down = True
+                log_event(f"STORAGE_UNAVAILABLE {problem}")
+                rumps.notification(
+                    "TimeCap", "Storage unavailable",
+                    f"{BASE_DIR}\nCapture resumes when the folder is back."
+                )
+            self._sync_menu()
+            return
+        if self.storage_down:
+            self.storage_down = False
+            self.frame_count  = len(FileManager.snapshot())
+            log_event("STORAGE_BACK")
 
         path = FileManager.new_capture_path()
         try:
@@ -444,7 +578,7 @@ class TimeCap(rumps.App):
             # Prevents main-loop freeze — handled the same as CAPTURE_FAIL.
             self._skip_logged = False
             self.fail_count += 1
-            self._log_event("CAPTURE_TIMEOUT")
+            log_event("CAPTURE_TIMEOUT")
             self._sync_menu()
             return
 
@@ -456,7 +590,7 @@ class TimeCap(rumps.App):
         else:
             self._skip_logged = False
             self.fail_count += 1
-            self._log_event("CAPTURE_FAIL")
+            log_event(f"CAPTURE_FAIL rc={result.returncode} {_last_lines(result.stderr, 1)}")
             self._sync_menu()
             if self.fail_count == 1:
                 rumps.notification(
@@ -467,11 +601,35 @@ class TimeCap(rumps.App):
                     ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"]
                 )
 
+    # ── worker ↔ main thread ─────────────
+    #
+    # macOS UI is main-thread only. Workers do file work, then hand one callback
+    # to _ui_queue; _drain_ui runs it on the main thread via a rumps.Timer.
+
+    def _start_worker(self, target, *args):
+        self.is_processing = True
+        self._sync_menu()
+        self._ui_timer.start()
+        self._worker = threading.Thread(target=target, args=args, daemon=True)
+        self._worker.start()
+
+    def _drain_ui(self, _=None):
+        while True:
+            try:
+                callback = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            callback()
+        if not self.is_processing:
+            self._ui_timer.stop()
+
     # ── Block 2 — Make Video ─────────────
 
     def make_video(self, _):
         if self.is_processing:
             rumps.notification("TimeCap", "Busy", "Another operation is in progress")
+            return
+        if self._storage_blocked():
             return
 
         files = FileManager.snapshot()
@@ -485,34 +643,37 @@ class TimeCap(rumps.App):
             )
             return
 
-        # Snapshot — locks the file set so captures made during/after Make Video
-        # are not swept up by this video's archive.
-        self.last_video_files = list(files)
-        self.is_processing = True
-        self._sync_menu()
-
         cap_status = "capture running" if self.is_capturing else "capture stopped"
         rumps.notification(
             "TimeCap", "Make Video",
             f"{len(files)} frames / {cap_status}"
         )
 
-        thread = threading.Thread(
-            target=self._run_ffmpeg, args=(files,), daemon=True
-        )
-        thread.start()
+        # `files` is a snapshot — captures made during/after Make Video are not
+        # swept up by this video's archive.
+        self._start_worker(self._run_ffmpeg, files)
 
     def _run_ffmpeg(self, files):
-        if not FFMPEG:
-            rumps.notification(
-                "TimeCap", "ffmpeg not found",
-                "Install via: brew install ffmpeg"
-            )
-            self.is_processing = False
-            self._sync_menu()
-            return
+        """Worker thread. File work only — no UI calls here."""
+        try:
+            outcome = self._render_and_archive(files)
+        except Exception as e:
+            log_event(f"VIDEO_FAIL unexpected {e!r}")
+            outcome = {"ok": False, "title": "Make Video failed", "error": str(e)}
+        self._ui_queue.put(lambda: self._video_done(files, outcome))
 
-        out = FileManager.new_video_path()
+    def _render_and_archive(self, files):
+        if not FFMPEG:
+            log_event("VIDEO_FAIL ffmpeg not found")
+            return {"ok": False, "title": "ffmpeg not found",
+                    "error": "Install via: brew install ffmpeg"}
+
+        out  = FileManager.new_video_path()
+        # Render under a temporary name: a half-written file never looks like a video.
+        part = out + ".part"
+
+        command = [FFMPEG, "-y", "-r", str(FPS), "-f", "concat", "-safe", "0"]
+        size = FileManager.video_size(files)
 
         with tempfile.NamedTemporaryFile(
             mode="w", suffix="_filelist.txt", delete=False
@@ -523,63 +684,81 @@ class TimeCap(rumps.App):
                 f.write(f"file '{escaped}'\n")
             list_path = f.name
 
-        try:
-            result = subprocess.run([
-                FFMPEG, "-y",
-                "-r", str(FPS),
-                "-f", "concat",
-                "-safe", "0",
-                "-i", list_path,
-                "-c:v", "libx264",
-                "-pix_fmt", "yuv420p",
-                out
-            ], capture_output=True)
+        command += ["-i", list_path]
+        if size:
+            # Fit every frame into one size, keeping its aspect ratio (black bars
+            # fill the rest) — frames from a different display are not stretched.
+            w, h = size
+            command += ["-vf", (
+                f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+                f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1"
+            )]
+        command += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-f", "mp4", part]
 
+        try:
+            result = subprocess.run(command, capture_output=True)
             video_ready = (
                 result.returncode == 0
-                and os.path.isfile(out)
-                and os.path.getsize(out) > 0
+                and os.path.isfile(part)
+                and os.path.getsize(part) > 0
             )
-
-            if video_ready:
-                # Archive only the snapshot passed to ffmpeg. Captures made while
-                # the video was rendering stay in screenshots/ for the next video.
-                created_at = datetime.now()
-                archive_path = FileManager.video_archive_path(out, created_at)
-                try:
-                    archive_path = FileManager.get_video_archive_dir(out, created_at)
-                    FileManager.write_manifest(archive_path, out, files, created_at)
-                    moved, failed = FileManager.move_to_archive(files, archive_path)
-                except OSError:
-                    moved, failed = 0, len(files)
-                remaining = [f for f in files if os.path.exists(f)]
-                self.last_video_files = remaining
-                self.last_video_archive = archive_path if remaining else None
-                self.frame_count = len(FileManager.snapshot())
-
-                detail = f"Video created: 1 / Frames archived: {moved}"
-                if failed:
-                    detail += f" ({failed} kept for manual retry)"
-                rumps.notification("TimeCap", "Video ready", detail)
-            else:
-                rumps.notification(
-                    "TimeCap", "ffmpeg error", result.stderr.decode()[:120]
-                )
-                # Video generation failed — invalidate the snapshot so Archive Move
-                # does not act on a stale file set.
-                self.last_video_files = []
-                self.last_video_archive = None
+            if not video_ready:
+                # Frames are untouched — nothing was moved.
+                reason = _last_lines(result.stderr)
+                log_event(f"VIDEO_FAIL rc={result.returncode} {reason}")
+                return {"ok": False, "title": "ffmpeg error",
+                        "error": _last_lines(result.stderr, 1)[:120]}
+            os.replace(part, out)
         finally:
-            if os.path.exists(list_path):
-                os.remove(list_path)
-            self.is_processing = False
-            self._sync_menu()
+            for leftover in (list_path, part):
+                if os.path.exists(leftover):
+                    os.remove(leftover)
+
+        # Archive only the snapshot passed to ffmpeg. Captures made while
+        # the video was rendering stay in screenshots/ for the next video.
+        created_at = datetime.now()
+        archive_path = FileManager.video_archive_path(out, created_at)
+        try:
+            archive_path = FileManager.get_video_archive_dir(out, created_at)
+            FileManager.write_manifest(archive_path, out, files, created_at)
+            moved, failed = FileManager.move_to_archive(files, archive_path)
+        except OSError as e:
+            log_event(f"ARCHIVE_FAIL {e}")
+            moved, failed = 0, len(files)
+        log_event(
+            f"VIDEO_OK {os.path.basename(out)} frames={len(files)} "
+            f"archived={moved} kept={failed}"
+        )
+        return {"ok": True, "moved": moved, "failed": failed,
+                "archive_path": archive_path}
+
+    def _video_done(self, files, outcome):
+        """Main thread. Apply the worker's result to state, menu and notifications."""
+        if outcome["ok"]:
+            remaining = [f for f in files if os.path.exists(f)]
+            self.last_video_files = remaining
+            self.last_video_archive = outcome["archive_path"] if remaining else None
+            detail = f"Video created: 1 / Frames archived: {outcome['moved']}"
+            if outcome["failed"]:
+                detail += f" ({outcome['failed']} kept for manual retry)"
+            rumps.notification("TimeCap", "Video ready", detail)
+        else:
+            rumps.notification("TimeCap", outcome["title"], outcome["error"])
+            # Video generation failed — invalidate the snapshot so Archive Move
+            # does not act on a stale file set.
+            self.last_video_files = []
+            self.last_video_archive = None
+        self.is_processing = False
+        self.frame_count = len(FileManager.snapshot())
+        self._sync_menu()
 
     # ── Block 3 — Archive Move ───────────
 
     def archive_move(self, _):
         if self.is_processing:
             rumps.notification("TimeCap", "Busy", "Another operation is in progress")
+            return
+        if self._storage_blocked():
             return
 
         # Manual Archive Move is a retry tool. It only moves remaining frames from
@@ -598,18 +777,23 @@ class TimeCap(rumps.App):
             )
             return
 
-        self.is_processing = True
-        thread = threading.Thread(
-            target=self._run_archive_move, args=(files, archive_path), daemon=True
-        )
-        thread.start()
+        self._start_worker(self._run_archive_move, files, archive_path)
 
     def _run_archive_move(self, files, archive_path):
+        """Worker thread. File work only — no UI calls here."""
         try:
             os.makedirs(archive_path, exist_ok=True)
             moved, failed = FileManager.move_to_archive(files, archive_path)
-        except OSError:
+        except OSError as e:
+            log_event(f"ARCHIVE_FAIL {e}")
             moved, failed = 0, len(files)
+        log_event(f"ARCHIVE_MOVE archived={moved} failed={failed}")
+        self._ui_queue.put(
+            lambda: self._archive_done(files, archive_path, moved, failed)
+        )
+
+    def _archive_done(self, files, archive_path, moved, failed):
+        """Main thread. Apply the worker's result to state, menu and notifications."""
         detail = f"Frames archived: {moved}"
         if failed:
             detail += f" / {failed} failed"
@@ -650,7 +834,7 @@ class TimeCap(rumps.App):
                 "── Required permissions ──\n"
                 "· Screen Recording — for screen capture\n"
                 "· Notifications — for status alerts\n"
-                "· Disk Access — to save into the selected folder"
+                "· Write access to the selected storage folder"
             )
         )
 
@@ -661,9 +845,6 @@ class TimeCap(rumps.App):
 
     def _idle_title(self):
         return f"⏸ Idle Threshold [{_fmt_seconds(IDLE_THRESHOLD)}]"
-
-    def _mode_title(self):
-        return f"🎭 Idle Mode [{IDLE_MODE}]"
 
     def _sound_title(self):
         return "🔔 Sound [ON]" if SOUND_ENABLED else "🔕 Sound [OFF]"
@@ -691,14 +872,6 @@ class TimeCap(rumps.App):
         for sec, item in self.idle_items.items():
             item.state = 1 if sec == seconds else 0
         self.idle_menu.title = self._idle_title()
-        save_config()
-
-    def set_idle_mode(self, mode):
-        global IDLE_MODE
-        IDLE_MODE = mode
-        for m, item in self.mode_items.items():
-            item.state = 1 if m == mode else 0
-        self.mode_menu.title = self._mode_title()
         save_config()
 
     def toggle_sound(self, sender):
@@ -740,18 +913,30 @@ class TimeCap(rumps.App):
             return
 
         global BASE_DIR
+        old_path = BASE_DIR
         BASE_DIR = new_path
-        FileManager.ensure_dirs()
+        if FileManager.storage_problem():
+            BASE_DIR = old_path
+            rumps.notification(
+                "TimeCap", "Storage folder not changed",
+                f"Cannot prepare folders in:\n{new_path}"
+            )
+            return
+        self.storage_down = False
+        # The retry list points into the old folder — it does not carry over.
+        self.last_video_files = []
+        self.last_video_archive = None
         self.frame_count = len(FileManager.snapshot())
         self.storage_item.title = self._storage_title()
         save_config()
+        log_event(f"STORAGE_CHANGED from {old_path}")
         self._sync_menu()
         rumps.notification("TimeCap", "Storage folder changed", new_path)
 
     # ── menubar sync ─────────────────────
 
     def _sync_menu(self):
-        err  = "! " if self.fail_count > 0 else ""
+        err  = "! " if (self.fail_count > 0 or self.storage_down) else ""
         proc = "⏳" if self.is_processing else ""
         needed = max(0, MIN_FRAMES - self.frame_count)
 
@@ -776,7 +961,9 @@ class TimeCap(rumps.App):
 
         label = f"{err}{proc}{cap} [{CAPTURE_INTERVAL}s]"
         self.title = label
-        if self.is_capturing and self.is_idle:
+        if self.storage_down:
+            self.status_item.title = "! Storage unavailable — check the storage folder"
+        elif self.is_capturing and self.is_idle:
             self.status_item.title = f"⏸ Idle — Capture Paused ({self.frame_count} frames, skipped {self.skip_count})"
         elif err or proc or self.is_capturing:
             self.status_item.title = label
@@ -792,4 +979,8 @@ class TimeCap(rumps.App):
 # ─────────────────────────────────────────
 
 if __name__ == "__main__":
-    TimeCap().run()
+    _instance_lock = acquire_instance_lock()   # held until the process exits
+    if _instance_lock is None:
+        rumps.alert(title="TimeCap", message="TimeCap is already running.")
+    else:
+        TimeCap().run()

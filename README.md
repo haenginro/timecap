@@ -43,6 +43,14 @@ pip install py2app
 python3 setup.py py2app        # → dist/TimeCap.app
 ```
 
+## Tests
+
+```bash
+python3 tests/test_timecap.py
+```
+
+Standard library only. The tests use a temporary folder and a stub menu bar, never call `screencapture`, and are safe to run while TimeCap itself is running. The video tests use your real ffmpeg and are skipped without it.
+
 ## Permissions
 
 macOS will require:
@@ -52,7 +60,17 @@ macOS will require:
 
 ## Storage note
 
-Frames are full-resolution JPEGs (~0.5 MB each on a Retina display). At the default 15 s interval that is roughly **120 MB per hour** — point the storage folder at a disk with room, and use Archive Move / delete old months regularly.
+Frames are full-resolution JPEGs, so their size follows your display: about 0.5 MB on a 1440p screen, 2–3 MB on a large Retina / ultrawide one. At the default 15 s interval (240 frames per hour) that is roughly **120–600 MB per hour** — point the storage folder at a disk with room. Archived frames are kept after their video is made; delete old `archive/` months yourself when you no longer need the originals.
+
+Only the main display is captured.
+
+If the display setup changes mid-recording, frames differ in size. The video takes the most common frame size and fits the others into it with their aspect ratio intact (black bars fill the rest).
+
+## When the storage folder disappears
+
+If the storage folder is on an external drive and the drive is unplugged, TimeCap keeps running: the menu bar shows `!`, captures wait, and they resume by themselves when the folder is back. Nothing is ever written to a volume that is not mounted. While the folder is away, log lines go to `~/Library/Application Support/TimeCap/logs/` instead.
+
+Each day's `logs/tc_YYYYMMDD.log` records capture start/stop, failures with their reason, idle skips, videos made and frames archived.
 
 ## Configuration
 
@@ -64,7 +82,7 @@ If you ran an older version that kept `config.json` next to `TimeCap.py`, it is 
 
 Making a video and handling its source frames used to be separate actions. In regular use, that separation added a repeat click and made it easy to leave already-consumed frames behind.
 
-TimeCap now treats a successfully created video as the trigger to archive exactly the frame snapshot used to make it. It verifies that ffmpeg succeeded and produced a non-empty video file before moving anything. If rendering fails or is interrupted, the source frames stay in `screenshots/`. Frames captured while the video is rendering are also left there for the next video.
+TimeCap now treats a successfully created video as the trigger to archive exactly the frame snapshot used to make it. The video is rendered under a temporary `.part` name and only gets its real name once ffmpeg has succeeded and produced a non-empty file — nothing is moved before that, and a file already in the archive is never overwritten. If rendering fails or is interrupted, the source frames stay in `screenshots/`. Frames captured while the video is rendering are also left there for the next video.
 
 The archive unit is the video, not a capture date. Each successful video creates this self-describing folder; the month comes from the video's creation time, so a recording that crosses midnight has one home.
 
